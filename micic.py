@@ -10,15 +10,17 @@ class TokenType(Enum):
     KW_USE = auto()
     KW_INIT = auto()
     KW_DESTROY = auto()
+    KW_UPDATE = auto()
     C_BLOCK = auto()
     EOF = auto()
 
 KEYWORDS = {
     'component': TokenType.KW_COMPONENT,
     'system': TokenType.KW_SYSTEM,
-    'use': TokenType.KW_SYSTEM,
-    'init': TokenType.KW_INIT,
+    'use': TokenType.KW_USE,
+    'initialize': TokenType.KW_INIT,
     'destroy': TokenType.KW_DESTROY,
+    'update': TokenType.KW_UPDATE
 }
 
 class Token:
@@ -138,7 +140,124 @@ class Lexer:
         self.tokens.append(Token(TokenType.EOF, '', self.line, self.col))
         return self.tokens
 
+class ParserException(Exception):
+    def __init__(self, parser: Parser, message: str):
+        super().__init__(f"{parser.peek().line}:{parser.peek().col}: {message}")
+
+class ComponentNode:
+    def __init__(self, name: str, struct: str):
+        self.name = name
+        self.struct = struct
+
+    def code_gen(self) -> str:
+        return f"""
+            typedef struct mici_component_{self.name}_t {{{self.struct}}} mici_component_{self.name}_t;
+        """.strip()
+    
+class SystemNode:
+    def __init__(self, name: str, struct: str, uses: list[str], init: str, destroy: str, update: str, c_blocks: list[str]):
+        self.name = name
+        self.struct = struct
+        self.uses = uses
+        self.init = init
+        self.destroy = destroy
+        self.update = update
+        self.c_blocks = c_blocks
+
+    def code_gen(self) -> str:
+        return f"""
+            typedef struct mici_system_{self.name}_t {{{self.struct}}} mici_system_{self.name}_t;
+        """.strip()
+
+class Parser():
+    def __init__(self, tokens: list[Token]):
+        self.tokens = tokens
+        self.tokens_len = len(tokens)
+        self.index = 0
+
+    def is_not_over(self) -> bool:
+        return self.tokens[self.index].type != TokenType.EOF
+
+    def peek(self, offset: int = 0) -> Token:
+        index = self.index + offset
+        return self.tokens[index] if index < self.tokens_len else None
+
+    def advance(self) -> Token:
+        token = self.peek()
+        if token.type != TokenType.EOF: self.index += 1
+        return token
+
+    def expect(self, type: TokenType):
+        token = self.peek()
+        if token.type != type:
+            raise ParserException(self, f"expected {type.name}, but got {token.type}")
+        return self.advance()
+    
+    def parse_component(self) -> ComponentNode:
+        self.expect(TokenType.KW_COMPONENT)
+        component_name = self.expect(TokenType.IDENTIFIER).value
+        component_struct = self.expect(TokenType.C_BLOCK).value
+        self.expect(TokenType.SEMICOLON)
+
+        while self.is_not_over():
+            token = self.peek()
+            raise ParserException(self, f"unexpected token {token.type.name} ({token.value})")
+
+        self.expect(TokenType.EOF)
+        return ComponentNode(component_name, component_struct)
+
+    def parse_system(self) -> SystemNode:
+        self.expect(TokenType.KW_SYSTEM)
+        system_name = self.expect(TokenType.IDENTIFIER).value
+        system_struct = self.expect(TokenType.C_BLOCK).value
+        self.expect(TokenType.SEMICOLON)
+
+        system_uses: list[str] = []
+        system_init: str = None
+        system_destroy: str = None
+        system_update: str = None
+        system_c_blocks: list[str] = []
+
+        while self.is_not_over():
+            token = self.peek()
+
+            if token.type == TokenType.KW_USE:
+                self.advance()
+                system_uses.append(self.expect(TokenType.IDENTIFIER).value)
+                self.expect(TokenType.SEMICOLON)
+                continue
+
+            if token.type == TokenType.KW_INIT:
+                if system_init != None:
+                    raise ParserException(self, "only one init allowed per system")
+                self.advance()
+                system_init = self.expect(TokenType.C_BLOCK).value
+                continue
+
+            if token.type == TokenType.KW_DESTROY:
+                if system_destroy != None:
+                    raise ParserException(self, "only one destroy allowed per system")
+                self.advance()
+                system_destroy = self.expect(TokenType.C_BLOCK).value
+                continue
             
+            if token.type == TokenType.KW_UPDATE:
+                if system_update != None:
+                    raise ParserException(self, "only one update allowed per system")
+                self.advance()
+                system_update = self.expect(TokenType.C_BLOCK).value
+                continue
+
+            if token.type == TokenType.C_BLOCK:
+                self.advance()
+                system_c_blocks.append(token.value)
+                continue
+
+            raise ParserException(self, f"unexpected token {token.type.name} ({token.value})")
+
+        self.expect(TokenType.EOF)
+        return SystemNode(system_name, system_struct, system_uses, system_init, system_destroy, system_update, system_c_blocks)
+    
 
 if __name__ == "__main__":
     argument_parser = argparse.ArgumentParser()
@@ -155,4 +274,12 @@ if __name__ == "__main__":
             source = file.read()
 
         tokens = Lexer(source).tokenize()
-        for token in tokens: print(token)
+        parser = Parser(tokens)
+
+        if extension == ".mcc":
+            node = parser.parse_component()
+            print(node.code_gen())
+
+        if extension == '.mcs':
+            node = parser.parse_system()
+            print(node.code_gen())

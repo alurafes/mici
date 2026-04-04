@@ -1,6 +1,9 @@
 // an example of a system
-system render;
+system render {
+
+};
 use position;
+use rotation;
 
 {
 // any anonymous c code is here

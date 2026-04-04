@@ -1,4 +1,6 @@
 // an example of a component
-component position;
-float x;
-float y;
+component position 
+{
+    float x;
+    float y;
+};
