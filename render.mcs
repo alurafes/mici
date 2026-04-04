@@ -1,0 +1,22 @@
+// an example of a system
+system render;
+use position;
+
+{
+// any anonymous c code is here
+}
+
+initialize
+{
+
+}
+
+destroy
+{
+
+}
+
+update
+{
+
+}
