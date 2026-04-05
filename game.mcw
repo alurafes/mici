@@ -1,0 +1,11 @@
+world game;
+use archetype "player.mca";
+
+// systems will be initialized in the same order as defined
+use system "render.mcs";
+
+// define update order. if not present, it will use the same order as the import order
+behaviour 
+{
+    render;
+}

@@ -2,16 +2,14 @@
 system render {
 
 };
-use "position.mcc";
-use "rotation.mcc";
+use component "position.mcc";
+use component "rotation.mcc";
 
 {
-
-void test()
-{
-    printf("test\n");
-}
-
+    void test()
+    {
+        printf("test\n");
+    }
 }
 
 initialize
@@ -24,7 +22,17 @@ destroy
 
 }
 
+pre_update
+{
+
+}
+
 update
+{
+
+}
+
+post_update
 {
 
 }

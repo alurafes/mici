@@ -28,13 +28,20 @@ mici_result_t mici_world_create(mici_world_t **world)
     return MICI_RESULT_OK;
 }
 
-void mici_world_free(mici_world_t *world)
+void mici_world_free(mici_world_t **world)
 {
-    free(world);
+    free(*world);
+    *world = NULL;
 }
 
 int main()
 {
-    printf("TESTING\n");
+    mici_world_t* world;
+    mici_result_t result = mici_world_create(&world);
+    if (result != MICI_RESULT_OK) return 1;
+
+    
+
+    mici_world_free(&world);
     return 0;
 }
