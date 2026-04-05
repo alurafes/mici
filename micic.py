@@ -13,6 +13,7 @@ class TokenType(Enum):
     KW_UPDATE = auto()
     C_BLOCK = auto()
     EOF = auto()
+    STRING = auto()
 
 KEYWORDS = {
     'component': TokenType.KW_COMPONENT,
@@ -24,7 +25,8 @@ KEYWORDS = {
 }
 
 class Token:
-    def __init__(self, type: TokenType, value: str, line: int, col: int):
+    def __init__(self, lexer: Lexer, type: TokenType, value: str, line: int, col: int):
+        self.lexer = lexer
         self.type = type
         self.value = value
         self.line = line
@@ -34,11 +36,27 @@ class Token:
         return f"Token(type: {self.type.name}, value: {self.value}, line: {self.line}, col: {self.col})"
 
 class LexerException(Exception):
-    pass
+    def __init__(self, lexer: Lexer, message):
+        super().__init__(f"{lexer.source_file}:{lexer.line}:{lexer.col}: {message}")
+
+ESCAPE_CHARACTERS = {
+    'n': '\n',
+    't': '\t',
+    'r': '\r',
+    'a': '\a',
+    'b': '\b',
+    'f': '\f',
+    'v': '\v',
+    '\\': '\\',
+    '\'': '\'',
+    '\"': '\"',
+    '0': '\0'
+}
 
 class Lexer:
-    def __init__(self, source: str):
+    def __init__(self, source: str, source_file: str):
         self.source = source
+        self.source_file = source_file
         self.index = 0
         self.line = 1
         self.col = 1
@@ -78,7 +96,7 @@ class Lexer:
                 self.advance()
                 return
             self.advance()
-        raise LexerException("cannot find the end of \"/*\" comment")
+        raise LexerException(self, "cannot find the end of \"/*\" comment")
 
     def tokenize(self) -> list[Token]:
         while self.is_not_over():
@@ -87,6 +105,8 @@ class Lexer:
                 break
 
             current_char = self.peek()
+            line = self.line
+            col = self.col
 
             if current_char == "/" and self.peek(1) == "/":
                 self.advance()
@@ -114,7 +134,7 @@ class Lexer:
                         depth -= 1
                         if depth == 0:
                             self.advance() # consume remaining }
-                            self.tokens.append(Token(TokenType.C_BLOCK, ''.join(code), self.line, self.col))
+                            self.tokens.append(Token(self, TokenType.C_BLOCK, ''.join(code), line, col))
                             break
                         code.append(self.advance())
                     else:
@@ -122,7 +142,7 @@ class Lexer:
                 continue
 
             if current_char == ';':
-                self.tokens.append(Token(TokenType.SEMICOLON, ';', self.line, self.col))
+                self.tokens.append(Token(self, TokenType.SEMICOLON, ';', line, col))
                 self.advance()
                 continue
 
@@ -132,30 +152,65 @@ class Lexer:
                     self.advance()
                 read_word = self.source[start_position:self.index]
                 read_token_type = KEYWORDS.get(read_word, TokenType.IDENTIFIER)
-                self.tokens.append(Token(read_token_type, read_word, self.line, self.col))
+                self.tokens.append(Token(self, read_token_type, read_word, line, col))
                 continue
 
-            raise LexerException(f"unexpected character at {self.line}:{self.col}")
+            if current_char == '"':
+                self.advance()
+                start_position = self.index
+                characters: list[str] = []
+                while self.is_not_over():
+                    read_char = self.advance()
+                    if read_char == '\\' and self.is_not_over():
+                        escape_char = self.advance()
+                        if escape_char not in ESCAPE_CHARACTERS.keys():
+                            raise LexerException(self, f"invalid escape character in string")
+                        characters.append(ESCAPE_CHARACTERS[escape_char])
+                    elif read_char == '"':
+                        break
+                    elif read_char == '\n':
+                        raise LexerException(self, f"unterminated string")
+                    else:
+                        characters.append(read_char)
+                read_string = ''.join(characters)
+                self.tokens.append(Token(self, TokenType.STRING, read_string, line, col))
+                print(read_string)
+                continue
 
-        self.tokens.append(Token(TokenType.EOF, '', self.line, self.col))
+            raise LexerException(self, f"unexpected character")
+
+        self.tokens.append(Token(self, TokenType.EOF, '', line, col))
         return self.tokens
 
 class ParserException(Exception):
     def __init__(self, parser: Parser, message: str):
-        super().__init__(f"{parser.peek().line}:{parser.peek().col}: {message}")
+        super().__init__(f"{parser.source_file}:{parser.peek().line}:{parser.peek().col}: {message}")
 
 class ComponentNode:
-    def __init__(self, name: str, struct: str):
+    def __init__(self, name: str, struct: Token):
         self.name = name
         self.struct = struct
+        self.full_component_name = f"mici_component_{self.name}"
+        self.header_file_name = f"{self.full_component_name}.h"
 
     def code_gen(self) -> str:
-        return f"""
-            typedef struct mici_component_{self.name}_t {{{self.struct}}} mici_component_{self.name}_t;
-        """.strip()
+        header_guard = f"{self.full_component_name.upper()}_H_"
+
+        header = '\n'.join([
+            f"#ifndef {header_guard}",
+            f"#define {header_guard}",
+            "",
+            f"// {self.struct.lexer.source_file}:{self.struct.line}:{self.struct.col}",
+            f"typedef struct {self.full_component_name}_t {{{self.struct.value}}} {self.full_component_name}_t;"
+            "",
+            "",
+            f"#endif // #define {header_guard}"
+        ])
+
+        return {self.header_file_name: header}
     
 class SystemNode:
-    def __init__(self, name: str, struct: str, uses: list[str], init: str, destroy: str, update: str, c_blocks: list[str]):
+    def __init__(self, name: str, struct: Token, uses: list[str], init: Token, destroy: Token, update: Token, c_blocks: list[Token]):
         self.name = name
         self.struct = struct
         self.uses = uses
@@ -163,16 +218,65 @@ class SystemNode:
         self.destroy = destroy
         self.update = update
         self.c_blocks = c_blocks
+        self.full_system_name = f"mici_system_{self.name}"
+        self.header_file_name = f"{self.full_system_name}.h"
+        self.source_file_name = f"{self.full_system_name}.c"
+
+    def use_to_include(self, use: str) -> str:
+        with open(use) as file:
+            source = file.read()
+        
+        use_directory = os.path.dirname(use)
+        component = Parser(Lexer(source, use).tokenize(), use).parse_component()
+        
+        include_path = os.path.join(use_directory, component.header_file_name).replace('\\', '/')
+        if not include_path.startswith('.'):
+            include_path = f"./{include_path}"
+
+        return include_path
 
     def code_gen(self) -> str:
-        return f"""
-            typedef struct mici_system_{self.name}_t {{{self.struct}}} mici_system_{self.name}_t;
-        """.strip()
+        header_guard = f"{self.full_system_name.upper()}_H_"
+        typename = f"{self.full_system_name}_t"
+
+        header = '\n'.join([
+            f"#ifndef {header_guard}",
+            f"#define {header_guard}",
+            "",
+            "\n".join(map(lambda use: f"#include \"{self.use_to_include(use)}\"", self.uses)),
+            "",
+            f"typedef struct {typename} {{{self.struct.value}}} {typename};"
+            "",
+            f"void mici_system_initialize_{self.name}({typename} *self);",
+            f"void mici_system_destroy_{self.name}({typename} *self);",
+            f"void mici_system_update_{self.name}({typename} *self);",
+            "",
+            f"#endif // #define {header_guard}"
+        ])
+
+        source = '\n'.join([
+            f"#include \"{self.header_file_name}\""
+            "",
+            "",
+            "\n".join(map(lambda x: f"// {x.lexer.source_file}:{x.line}:{x.col}\n{x.value}", self.c_blocks)),
+            "",
+            f"// {self.init.lexer.source_file}:{self.init.line}:{self.init.col}",
+            f"void mici_system_initialize_{self.name}({typename} *self) {{{self.init.value}}}",
+            "",
+            f"// {self.destroy.lexer.source_file}:{self.destroy.line}:{self.destroy.col}",
+            f"void mici_system_destroy_{self.name}({typename} *self) {{{self.destroy.value}}}",
+            "",
+            f"// {self.update.lexer.source_file}:{self.update.line}:{self.update.col}",
+            f"void mici_system_update_{self.name}({typename} *self) {{{self.update.value}}}",
+        ])
+
+        return {self.header_file_name: header, self.source_file_name: source}
 
 class Parser():
-    def __init__(self, tokens: list[Token]):
+    def __init__(self, tokens: list[Token], source_file: str):
         self.tokens = tokens
         self.tokens_len = len(tokens)
+        self.source_file = source_file
         self.index = 0
 
     def is_not_over(self) -> bool:
@@ -196,7 +300,7 @@ class Parser():
     def parse_component(self) -> ComponentNode:
         self.expect(TokenType.KW_COMPONENT)
         component_name = self.expect(TokenType.IDENTIFIER).value
-        component_struct = self.expect(TokenType.C_BLOCK).value
+        component_struct = self.expect(TokenType.C_BLOCK)
         self.expect(TokenType.SEMICOLON)
 
         while self.is_not_over():
@@ -209,21 +313,21 @@ class Parser():
     def parse_system(self) -> SystemNode:
         self.expect(TokenType.KW_SYSTEM)
         system_name = self.expect(TokenType.IDENTIFIER).value
-        system_struct = self.expect(TokenType.C_BLOCK).value
+        system_struct = self.expect(TokenType.C_BLOCK)
         self.expect(TokenType.SEMICOLON)
 
         system_uses: list[str] = []
-        system_init: str = None
-        system_destroy: str = None
-        system_update: str = None
-        system_c_blocks: list[str] = []
+        system_init: Token = None
+        system_destroy: Token = None
+        system_update: Token = None
+        system_c_blocks: list[Token] = []
 
         while self.is_not_over():
             token = self.peek()
 
             if token.type == TokenType.KW_USE:
                 self.advance()
-                system_uses.append(self.expect(TokenType.IDENTIFIER).value)
+                system_uses.append(self.expect(TokenType.STRING).value)
                 self.expect(TokenType.SEMICOLON)
                 continue
 
@@ -231,26 +335,26 @@ class Parser():
                 if system_init != None:
                     raise ParserException(self, "only one init allowed per system")
                 self.advance()
-                system_init = self.expect(TokenType.C_BLOCK).value
+                system_init = self.expect(TokenType.C_BLOCK)
                 continue
 
             if token.type == TokenType.KW_DESTROY:
                 if system_destroy != None:
                     raise ParserException(self, "only one destroy allowed per system")
                 self.advance()
-                system_destroy = self.expect(TokenType.C_BLOCK).value
+                system_destroy = self.expect(TokenType.C_BLOCK)
                 continue
             
             if token.type == TokenType.KW_UPDATE:
                 if system_update != None:
                     raise ParserException(self, "only one update allowed per system")
                 self.advance()
-                system_update = self.expect(TokenType.C_BLOCK).value
+                system_update = self.expect(TokenType.C_BLOCK)
                 continue
 
             if token.type == TokenType.C_BLOCK:
                 self.advance()
-                system_c_blocks.append(token.value)
+                system_c_blocks.append(token)
                 continue
 
             raise ParserException(self, f"unexpected token {token.type.name} ({token.value})")
@@ -273,8 +377,8 @@ if __name__ == "__main__":
         with open(file_path) as file:
             source = file.read()
 
-        tokens = Lexer(source).tokenize()
-        parser = Parser(tokens)
+        tokens = Lexer(source, file_path).tokenize()
+        parser = Parser(tokens, file_path)
 
         if extension == ".mcc":
             node = parser.parse_component()
@@ -282,4 +386,4 @@ if __name__ == "__main__":
 
         if extension == '.mcs':
             node = parser.parse_system()
-            print(node.code_gen())
+            print(node.code_gen()['mici_system_render.c'])

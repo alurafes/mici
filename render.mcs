@@ -2,11 +2,16 @@
 system render {
 
 };
-use position;
-use rotation;
+use "position.mcc";
+use "rotation.mcc";
 
 {
-// any anonymous c code is here
+
+void test()
+{
+    printf("test\n");
+}
+
 }
 
 initialize
