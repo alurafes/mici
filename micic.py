@@ -248,7 +248,7 @@ class SystemNode:
         self.source_file_name = f"{self.full_system_name}.c"
         self.header_guard = f"{self.full_system_name.upper()}_H_"
         self.type_name = f"{self.full_system_name}_t"
-        self.components = {x: self.parse_use_component(x) for x in self.use_components}
+        self.components = [self.parse_use_component(x) for x in self.use_components]
 
     def __repr__(self) -> str:
         return f"SystemNode(name: {self.name}, struct: {self.struct}, components: {self.use_components})"
@@ -269,14 +269,13 @@ class SystemNode:
 
     def code_gen(self) -> str:
         
-        update_parameters = ', '.join([f"{component['component'].type_name} *{component['component'].name}" for component in self.components.values()])
-        print(update_parameters)
+        update_parameters = ', '.join([f"{component['component'].type_name} *{component['component'].name}" for component in self.components])
 
         header = '\n'.join([
             f"#ifndef {self.header_guard}",
             f"#define {self.header_guard}",
             "",
-            "\n".join([f"#include \"{x['include_path']}\"" for x in self.components.values()]),
+            "\n".join([f"#include \"{x['include_path']}\"" for x in self.components]),
             "",
             f"typedef struct {self.type_name} {{{self.struct.value}}} {self.type_name};"
             "",
@@ -315,7 +314,7 @@ class ArchetypeNode:
         self.source_file_name = f"{self.full_name}.c"
         self.header_guard = f"{self.full_name.upper()}_H_"
         self.type_name = f"{self.full_name}_t"
-        self.components = {x: self.parse_use_component(x) for x in self.use_components}
+        self.components = [self.parse_use_component(x) for x in self.use_components]
 
     # todo: refactor as the same function is being used quite a lot in other classes
     def parse_use_component(self, use: str) -> str:
@@ -330,6 +329,22 @@ class ArchetypeNode:
             include_path = f"./{include_path}"
 
         return {'use_directory': use_directory, 'include_path': include_path, 'component': component}
+
+    def code_gen(self) -> dict:
+        component_pointers = '\n'.join([f"\t{component['component'].type_name} *{component['component'].name};" for component in self.components])
+        header = '\n'.join([
+            f"#ifndef {self.header_guard}",
+            f"#define {self.header_guard}",
+            "",
+            "\n".join([f"#include \"{x['include_path']}\"" for x in self.components]),
+            "",
+            f"typedef struct {self.type_name} {{\n{component_pointers}\n}} {self.type_name};"
+            "",
+            "",
+            f"#endif // #define {self.header_guard}"
+        ])
+
+        return {self.header_file_name: header}
 
     def __repr__(self) -> str:
         return f"ArchetypeNode(name: {self.name}, components: {self.use_components})"
@@ -348,8 +363,8 @@ class WorldNode:
         self.source_file_name = f"{self.full_name}.c"
         self.header_guard = f"{self.full_name.upper()}_H_"
         self.type_name = f"{self.full_name}_t"
-        self.archetypes = {x: self.parse_use_archetype(x) for x in self.use_archetypes}
-        self.systems = {x: self.parse_use_system(x) for x in self.use_systems}
+        self.archetypes = [self.parse_use_archetype(x) for x in self.use_archetypes]
+        self.systems = [self.parse_use_system(x) for x in self.use_systems]
         
     # todo: refactor as the same function is being used quite a lot in other classes
     def parse_use_archetype(self, use: str) -> str:
@@ -383,7 +398,35 @@ class WorldNode:
         return f"WorldNode(name: {self.name}, archetypes: {self.use_archetypes}, systems: {self.use_systems}, initialize_order: {self.initialize_order}, update_order: {self.update_order}, destroy_order: {self.destroy_order})"
 
     def code_gen(self) -> dict:
-        pass
+        max_entites_define = f"{self.full_name.upper()}_MAX_ENTITIES"
+
+        archetype_instances = '\n'.join([f"\t{x['archetype'].type_name}[{max_entites_define}] {x['archetype'].name}_instances;" for x in self.archetypes])
+
+        for system in self.systems:
+            required_components = {x['component'].name for x in system['system'].components}
+            eligible_archetypes = [x['archetype'] for x in self.archetypes if required_components.issubset({y['component'].name for y in x['archetype'].components})]
+
+
+
+        header = '\n'.join([
+            f"#ifndef {self.header_guard}",
+            f"#define {self.header_guard}",
+            "",
+            f"#define {max_entites_define} 1024"
+            "",
+            "",
+            "\n".join([f"#include \"{x['include_path']}\"" for x in self.archetypes]),
+            "",
+            "\n".join([f"#include \"{x['include_path']}\"" for x in self.systems]),
+            "",
+            f"typedef struct {self.type_name} {{\n{archetype_instances}\n}} {self.type_name};"
+            "",
+            "",
+            f"#endif // #define {self.header_guard}"
+        ])
+
+        return {self.header_file_name: header}
+        
 
 class Parser():
     def __init__(self, lexer: Lexer, source_file: str):
@@ -629,7 +672,7 @@ if __name__ == "__main__":
 
         if extension == ".mcc":
             node = parser.parse_component()
-            print(node)
+            print(node.code_gen())
 
         if extension == '.mcs':
             node = parser.parse_system()
@@ -637,8 +680,8 @@ if __name__ == "__main__":
 
         if extension == '.mca':
             node = parser.parse_archetype()
-            print(node)
+            print(list(node.code_gen().values())[0])
 
         if extension == '.mcw':
             node = parser.parse_world()
-            print(node)
+            print(list(node.code_gen().values())[0])
