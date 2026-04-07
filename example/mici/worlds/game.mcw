@@ -1,7 +1,7 @@
 world game;
-use archetype "player.mca";
+use archetype "../archetypes/player.mca";
 
-use system "render.mcs";
+use system "../systems/render.mcs";
 
 // define initialize order. if not present, it will use the same order as the import order
 initialize

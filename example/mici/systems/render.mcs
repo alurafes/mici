@@ -2,8 +2,8 @@
 system render {
     size_t count;
 };
-use component "position.mcc";
-use component "rotation.mcc";
+use component "../components/position.mcc";
+use component "../components/rotation.mcc";
 
 {
     void test()

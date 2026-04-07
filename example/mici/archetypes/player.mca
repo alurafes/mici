@@ -1,0 +1,3 @@
+archetype player;
+use component "../components/position.mcc";
+use component "../components/rotation.mcc";

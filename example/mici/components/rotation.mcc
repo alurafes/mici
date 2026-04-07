@@ -1,5 +1,5 @@
 // an example of a component
 component rotation 
 {
-    float angle
+    float angle;
 };
