@@ -2,11 +2,5 @@ CC = gcc
 FLAGS = -Wall -Werror
 LINKER = 
 
-micis: build build/main.o
-	$(CC) -o build/micis $(FLAGS) build/main.o $(LINKER)
-
-build:
-	mkdir build
-
-build/main.o: build main.c
-	$(CC) -o build/main.o -c main.c $(FLAGS)
+micis:
+	python micic.py -oi=./example/include/ -os=./example/src/ -ib ./example/mici/ example/mici/worlds/game.mcw example/mici/components/position.mcc example/mici/components/rotation.mcc example/mici/archetypes/player.mca example/mici/systems/render.mcs
