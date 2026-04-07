@@ -1,6 +1,6 @@
 // an example of a system
 system render {
-
+    size_t count;
 };
 use component "position.mcc";
 use component "rotation.mcc";
@@ -24,15 +24,15 @@ destroy
 
 pre_update
 {
-
+    self->count = 0;
 }
 
 update
 {
-
+    self->count += 1;
 }
 
 post_update
 {
-
+    printf("%zu\n", self->count);
 }

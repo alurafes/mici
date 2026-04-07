@@ -115,7 +115,7 @@ class Lexer:
 
     def get_next_token(self) -> Token:
         while self.is_not_over():
-            self.skip_empty()
+            if self.mode == LexerMode.DEFAULT: self.skip_empty()
             if not self.is_not_over():
                 break
 
@@ -250,6 +250,12 @@ class SystemNode:
         self.type_name = f"{self.full_system_name}_t"
         self.components = [self.parse_use_component(x) for x in self.use_components]
 
+        self.initialize_function_name = f"mici_system_initialize_{self.name}"
+        self.pre_update_function_name = f"mici_system_pre_update_{self.name}"
+        self.update_function_name = f"mici_system_update_{self.name}"
+        self.post_update_function_name = f"mici_system_post_update_{self.name}"
+        self.destroy_function_name = f"mici_system_destroy_{self.name}"
+
     def __repr__(self) -> str:
         return f"SystemNode(name: {self.name}, struct: {self.struct}, components: {self.use_components})"
 
@@ -279,9 +285,11 @@ class SystemNode:
             "",
             f"typedef struct {self.type_name} {{{self.struct.value}}} {self.type_name};"
             "",
-            f"void mici_system_initialize_{self.name}({self.type_name} *self);",
-            f"void mici_system_destroy_{self.name}({self.type_name} *self);",
-            f"void mici_system_update_{self.name}({self.type_name} *self, {update_parameters});",
+            f"void {self.initialize_function_name}({self.type_name} *self);",
+            f"void {self.destroy_function_name}({self.type_name} *self);",
+            f"void {self.pre_update_function_name}({self.type_name} *self);",
+            f"void {self.update_function_name}({self.type_name} *self, {update_parameters});",
+            f"void {self.post_update_function_name}({self.type_name} *self);",
             "",
             f"#endif // #define {self.header_guard}"
         ])
@@ -293,13 +301,19 @@ class SystemNode:
             "\n".join(map(lambda x: f"// {x.lexer.source_file}:{x.line}:{x.col}\n{x.value}", self.c_blocks)),
             "",
             f"// {self.init.lexer.source_file}:{self.init.line}:{self.init.col}",
-            f"void mici_system_initialize_{self.name}({self.type_name} *self) {{{self.init.value}}}",
+            f"void {self.initialize_function_name}({self.type_name} *self) {{{self.init.value}}}",
             "",
             f"// {self.destroy.lexer.source_file}:{self.destroy.line}:{self.destroy.col}",
-            f"void mici_system_destroy_{self.name}({self.type_name} *self, {update_parameters}) {{{self.destroy.value}}}",
+            f"void {self.destroy_function_name}({self.type_name} *self, {update_parameters}) {{{self.destroy.value}}}",
+            "",
+            f"// {self.pre_update.lexer.source_file}:{self.pre_update.line}:{self.pre_update.col}",
+            f"void {self.pre_update_function_name}({self.type_name} *self) {{{self.pre_update.value}}}",
             "",
             f"// {self.update.lexer.source_file}:{self.update.line}:{self.update.col}",
-            f"void mici_system_update_{self.name}({self.type_name} *self) {{{self.update.value}}}",
+            f"void {self.update_function_name}({self.type_name} *self) {{{self.update.value}}}",
+            "",
+            f"// {self.post_update.lexer.source_file}:{self.post_update.line}:{self.post_update.col}",
+            f"void {self.post_update_function_name}({self.type_name} *self) {{{self.post_update.value}}}",
         ])
 
         return {self.header_file_name: header, self.source_file_name: source}
@@ -336,9 +350,11 @@ class ArchetypeNode:
             f"#ifndef {self.header_guard}",
             f"#define {self.header_guard}",
             "",
+            "#include <mici.h>",
+            ","
             "\n".join([f"#include \"{x['include_path']}\"" for x in self.components]),
             "",
-            f"typedef struct {self.type_name} {{\n{component_pointers}\n}} {self.type_name};"
+            f"typedef struct {self.type_name} {{\n{component_pointers}\n\tsize_t count; size_t capacity;\n}} {self.type_name};"
             "",
             "",
             f"#endif // #define {self.header_guard}"
@@ -350,13 +366,17 @@ class ArchetypeNode:
         return f"ArchetypeNode(name: {self.name}, components: {self.use_components})"
 
 class WorldNode:
-    def __init__(self, name, use_archetypes, use_systems, initialize_order, update_order, destroy_order):
+    def __init__(self, name, use_archetypes: list[str], use_systems: list[str], initialize_order: list[str], update_order: list[str], destroy_order: list[str]):
         self.name = name
         self.use_archetypes = use_archetypes
         self.use_systems = use_systems
         self.initialize_order = initialize_order
         self.update_order = update_order
         self.destroy_order = destroy_order
+
+        if len(initialize_order) == 0: initialize_order = use_systems.copy()
+        if len(update_order) == 0: update_order = use_systems.copy()
+        if len(destroy_order) == 0: destroy_order = use_systems.copy()
 
         self.full_name = f"mici_world_{self.name}"
         self.header_file_name = f"{self.full_name}.h"
@@ -365,6 +385,10 @@ class WorldNode:
         self.type_name = f"{self.full_name}_t"
         self.archetypes = [self.parse_use_archetype(x) for x in self.use_archetypes]
         self.systems = [self.parse_use_system(x) for x in self.use_systems]
+
+        self.initialize_function_name = f"mici_world_initialize_{self.name}"
+        self.update_function_name = f"mici_world_update_{self.name}"
+        self.destroy_function_name = f"mici_world_destroy_{self.name}"
         
     # todo: refactor as the same function is being used quite a lot in other classes
     def parse_use_archetype(self, use: str) -> str:
@@ -398,34 +422,52 @@ class WorldNode:
         return f"WorldNode(name: {self.name}, archetypes: {self.use_archetypes}, systems: {self.use_systems}, initialize_order: {self.initialize_order}, update_order: {self.update_order}, destroy_order: {self.destroy_order})"
 
     def code_gen(self) -> dict:
-        max_entites_define = f"{self.full_name.upper()}_MAX_ENTITIES"
+        archetype_instances = '\n'.join([f"\t{x['archetype'].type_name} {x['archetype'].name};" for x in self.archetypes])
+        system_instances = '\n'.join([f"\t{x['system'].type_name} {x['system'].name};" for x in self.systems])
 
-        archetype_instances = '\n'.join([f"\t{x['archetype'].type_name}[{max_entites_define}] {x['archetype'].name}_instances;" for x in self.archetypes])
+        initialize_calls: dict = {system['system'].name: f"{system['system'].initialize_function_name}(self->{system['system'].name});" for system in self.systems}
+        update_calls: dict = {}
+        destroy_calls: dict = {system['system'].name: f"{system['system'].destroy_function_name}(self->{system['system'].name});" for system in self.systems}
 
         for system in self.systems:
             required_components = {x['component'].name for x in system['system'].components}
             eligible_archetypes = [x['archetype'] for x in self.archetypes if required_components.issubset({y['component'].name for y in x['archetype'].components})]
 
+            for archetype in eligible_archetypes:
+                component_for_update = ", ".join([f"self->{archetype.name}.{x['component'].name}[__mici_archetype_instance_index]" for x in system['system'].components])
+                pre_update_call = f"{system['system'].pre_update_function_name}(self->{system['system'].name});"
+                update_call = f"\t{system['system'].update_function_name}(self->{system['system'].name}, {component_for_update});"
+                post_update_call = f"{system['system'].post_update_function_name}(self->{system['system'].name});"
+                update_calls[system['system'].name] = (f"{pre_update_call}\n\tfor (size_t __mici_archetype_instance_index = 0; __mici_archetype_instance_index < self->{archetype.name}.count; ++__mici_archetype_instance_index) {{\n\t{update_call}\n\t}}\n\t{post_update_call}")
 
+            print(initialize_calls)
 
         header = '\n'.join([
             f"#ifndef {self.header_guard}",
             f"#define {self.header_guard}",
             "",
-            f"#define {max_entites_define} 1024"
-            "",
-            "",
             "\n".join([f"#include \"{x['include_path']}\"" for x in self.archetypes]),
             "",
             "\n".join([f"#include \"{x['include_path']}\"" for x in self.systems]),
             "",
-            f"typedef struct {self.type_name} {{\n{archetype_instances}\n}} {self.type_name};"
+            f"typedef struct {self.type_name} {{\n{archetype_instances}\n{system_instances}\n}} {self.type_name};\n"
             "",
+            f"void {self.initialize_function_name}({self.type_name} *self);",
+            f"void {self.update_function_name}({self.type_name} *self);",
+            f"void {self.destroy_function_name}({self.type_name} *self);",
             "",
             f"#endif // #define {self.header_guard}"
         ])
 
-        return {self.header_file_name: header}
+        source = '\n'.join([
+            f"#include {self.header_file_name}",
+            "",
+            f"void {self.initialize_function_name}({self.type_name} *self) {{\n{'\n'.join([f"\t{initialize_calls[system]}" for system in self.initialize_order])}\n}}",
+            f"void {self.update_function_name}({self.type_name} *self) {{\n{'\n\n'.join([f"\t{update_calls[system]}" for system in self.initialize_order])}\n}}",
+            f"void {self.destroy_function_name}({self.type_name} *self) {{\n{'\n'.join([f"\t{destroy_calls[system]}" for system in self.initialize_order])}\n}}",
+        ])
+
+        return {self.header_file_name: header, self.source_file_name: source}
         
 
 class Parser():
@@ -600,6 +642,9 @@ class Parser():
         world_destroy_order: list[str] = []
         self.expect(TokenType.SEMICOLON)
 
+        # todo: cache those. I keep re-parsing them
+        parsed_use_systems = {}
+
         while self.is_not_over():
             token = self.peek()
 
@@ -609,9 +654,15 @@ class Parser():
                 if use_type.type not in [TokenType.KW_SYSTEM, TokenType.KW_ARCHETYPE]:
                     raise ParserException(self, "only systems and archetypes are allowed to be inside a world")
                 use_name = self.expect(TokenType.STRING).value
-                if use_type.type == TokenType.KW_SYSTEM: world_use_systems.append(use_name)
+                if use_type.type == TokenType.KW_SYSTEM: 
+                    world_use_systems.append(use_name)
+                    with open(use_name) as file:
+                        source = file.read()
+                    system = Parser(Lexer(source, use_name), use_name).parse_system()
+                    parsed_use_systems[system.name] = system
                 elif use_type.type == TokenType.KW_ARCHETYPE: world_use_archetypes.append(use_name)
                 self.expect(TokenType.SEMICOLON)
+
                 continue
 
             if token.type == TokenType.KW_INITIALIZE:
@@ -621,9 +672,14 @@ class Parser():
                 self.expect(TokenType.LBRACE)
                 self.lexer.mode = LexerMode.DEFAULT
                 while self.is_not_over() and self.peek().type != TokenType.RBRACE:
-                    world_initialize_order.append(self.expect(TokenType.IDENTIFIER).value)
+                    system = self.expect(TokenType.IDENTIFIER).value
+                    if system not in parsed_use_systems:
+                        raise ParserException(self, f"undefined system `{system}` is present in the initialize block")
+                    world_initialize_order.append(system)
                     self.expect(TokenType.SEMICOLON)
                 self.expect(TokenType.RBRACE)
+                if len(world_initialize_order) != len(parsed_use_systems):
+                    raise ParserException(self, "not all systems are present in the initialize block")
                 continue
 
             if token.type == TokenType.KW_UPDATE:
@@ -633,21 +689,31 @@ class Parser():
                 self.expect(TokenType.LBRACE)
                 self.lexer.mode = LexerMode.DEFAULT
                 while self.is_not_over() and self.peek().type != TokenType.RBRACE:
-                    world_update_order.append(self.expect(TokenType.IDENTIFIER).value)
+                    system = self.expect(TokenType.IDENTIFIER).value
+                    if system not in parsed_use_systems:
+                        raise ParserException(self, f"undefined system `{system}` is present in the update block")
+                    world_update_order.append(system)
                     self.expect(TokenType.SEMICOLON)
                 self.expect(TokenType.RBRACE)
+                if len(world_update_order) != len(parsed_use_systems):
+                    raise ParserException(self, "not all systems are present in the update block")
                 continue
 
             if token.type == TokenType.KW_DESTROY:
                 if world_destroy_order:
-                    raise ParserException(self, "initialize order is already set in this world")
+                    raise ParserException(self, "destroy order is already set in this world")
                 self.advance()
                 self.expect(TokenType.LBRACE)
                 self.lexer.mode = LexerMode.DEFAULT
                 while self.is_not_over() and self.peek().type != TokenType.RBRACE:
-                    world_destroy_order.append(self.expect(TokenType.IDENTIFIER).value)
+                    system = self.expect(TokenType.IDENTIFIER).value
+                    if system not in parsed_use_systems:
+                        raise ParserException(self, f"undefined system `{system}` is present in the destroy block")
+                    world_destroy_order.append(system)
                     self.expect(TokenType.SEMICOLON)
                 self.expect(TokenType.RBRACE)
+                if len(world_destroy_order) != len(parsed_use_systems):
+                    raise ParserException(self, "not all systems are present in the destroy block")
                 continue
 
             raise ParserException(self, f"unexpected token {token.type.name} ({token.value})")
@@ -676,7 +742,7 @@ if __name__ == "__main__":
 
         if extension == '.mcs':
             node = parser.parse_system()
-            print(node.code_gen())
+            print(list(node.code_gen().values())[1])
 
         if extension == '.mca':
             node = parser.parse_archetype()
@@ -684,4 +750,4 @@ if __name__ == "__main__":
 
         if extension == '.mcw':
             node = parser.parse_world()
-            print(list(node.code_gen().values())[0])
+            print(list(node.code_gen().values())[1])
