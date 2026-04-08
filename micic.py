@@ -1,6 +1,8 @@
 import os
 import argparse
 from enum import Enum, auto
+from dataclasses import dataclass
+from contextlib import contextmanager
 
 class TokenType(Enum):
     IDENTIFIER = auto()
@@ -34,21 +36,6 @@ KEYWORDS = {
     'post_update': TokenType.KW_POST_UPDATE,
 }
 
-class Token:
-    def __init__(self, lexer: Lexer, type: TokenType, value: str, line: int, col: int):
-        self.lexer = lexer
-        self.type = type
-        self.value = value
-        self.line = line
-        self.col = col
-
-    def __repr__(self):
-        return f"Token(type: {self.type.name}, value: {self.value}, line: {self.line}, col: {self.col})"
-
-class LexerException(Exception):
-    def __init__(self, lexer: Lexer, message):
-        super().__init__(f"{lexer.source_file}:{lexer.line}:{lexer.col}: {message}")
-
 ESCAPE_CHARACTERS = {
     'n': '\n',
     't': '\t',
@@ -62,6 +49,37 @@ ESCAPE_CHARACTERS = {
     '\"': '\"',
     '0': '\0'
 }
+
+# Utils stuff
+
+def join_new_lines(*lines) -> str:
+    return "\n".join(l for l in lines if l is not None)
+
+def indent(text: str, level: int = 1):
+    pad = "\t" * level
+    return "\n".join(pad + line if line else line for line in text.split("\n"))
+
+# Parser stuff
+
+@dataclass
+class Token:
+    lexer: Lexer
+    type: TokenType
+    value: str
+    line: int
+    col: int
+
+    def __repr__(self):
+        return f"Token(type: {self.type.name}, value: {self.value}, line: {self.line}, col: {self.col})"
+
+@dataclass
+class UseEntry:
+    use_directory: str
+    include_path: str
+    node: object
+
+class LexerException(Exception):
+    pass
 
 class LexerMode(Enum):
     RAW_C = auto()
@@ -78,6 +96,9 @@ class Lexer:
         self.source_len = len(source)
         self.source_directory = source_directory
         self.mode: LexerMode = LexerMode.DEFAULT
+
+    def raise_exception(self, message: str):
+        raise LexerException(f"{lexer.source_file}:{lexer.line}:{lexer.col}: {message}")
 
     def advance(self):
         char = self.source[self.index]
@@ -112,7 +133,7 @@ class Lexer:
                 self.advance()
                 return
             self.advance()
-        raise LexerException(self, "cannot find the end of \"/*\" comment")
+        self.raise_exception("cannot find the end of \"/*\" comment")
 
     def get_next_token(self) -> Token:
         while self.is_not_over():
@@ -185,18 +206,18 @@ class Lexer:
                     if read_char == '\\' and self.is_not_over():
                         escape_char = self.advance()
                         if escape_char not in ESCAPE_CHARACTERS.keys():
-                            raise LexerException(self, f"invalid escape character in string")
+                            self.raise_exception(f"invalid escape character in string")
                         characters.append(ESCAPE_CHARACTERS[escape_char])
                     elif read_char == '"':
                         break
                     elif read_char == '\n':
-                        raise LexerException(self, f"unterminated string")
+                        self.raise_exception(f"unterminated string")
                     else:
                         characters.append(read_char)
                 read_string = ''.join(characters)
                 return Token(self, TokenType.STRING, read_string, line, col)
 
-            raise LexerException(self, f"unexpected character")
+            self.raise_exception(f"unexpected character")
 
         return Token(self, TokenType.EOF, '', self.line, self.col)
 
@@ -217,7 +238,7 @@ class ComponentNode:
         return f"ComponentNode(name: {self.name}, struct: {self.struct})"
 
 
-    def code_gen(self) -> str:
+    def code_gen(self, file_base_path) -> str:
 
         header = '\n'.join([
             f"#ifndef {self.header_guard}",
@@ -253,7 +274,7 @@ class SystemNode:
         self.source_file_name = f"{self.full_system_name}.c"
         self.header_guard = f"{self.full_system_name.upper()}_H_"
         self.type_name = f"{self.full_system_name}_t"
-        self.components = [self.parse_use_component(x) for x in self.use_components]
+        self.components = [load_and_parse(x, self.source_directory, lambda p: p.parse_component()) for x in self.use_components]
 
         self.initialize_function_name = f"mici_system_initialize_{self.name}"
         self.pre_update_function_name = f"mici_system_pre_update_{self.name}"
@@ -264,23 +285,9 @@ class SystemNode:
     def __repr__(self) -> str:
         return f"SystemNode(name: {self.name}, struct: {self.struct}, components: {self.use_components})"
 
-    # todo: refactor as the same function is being used quite a lot in other classes
-    def parse_use_component(self, use: str) -> str:
-        use_source_file = os.path.normpath(os.path.join(self.source_directory, use))
-        use_source_directory = os.path.dirname(use_source_file)
-        with open(use_source_file) as file:
-            source = file.read()
-        component = Parser(Lexer(source, use_source_file, use_source_directory), use_source_file).parse_component()
+    def code_gen(self, file_base_path) -> str:
         
-        include_path = os.path.join(os.path.dirname(use), component.header_file_name).replace('\\', '/')
-        if not include_path.startswith('.'):
-            include_path = f"./{include_path}"
-
-        return {'use_directory': use_source_directory, 'include_path': include_path, 'component': component}
-
-    def code_gen(self) -> str:
-        
-        update_parameters = ', '.join([f"{component['component'].type_name} *{component['component'].name}" for component in self.components])
+        update_parameters = [f"{component.node.type_name} *{component.node.name}" for component in self.components]
 
         header = '\n'.join([
             f"#ifndef {self.header_guard}",
@@ -288,21 +295,21 @@ class SystemNode:
             "",
             "#include <mici.h>",
             "",
-            "\n".join([f"#include \"{x['include_path']}\"" for x in self.components]),
+            "\n".join([f"#include \"{x.include_path}\"" for x in self.components]),
             "",
             f"typedef struct {self.type_name} {{{self.struct.value}}} {self.type_name};"
             "",
             f"void {self.initialize_function_name}({self.type_name} *self);",
             f"void {self.destroy_function_name}({self.type_name} *self);",
             f"void {self.pre_update_function_name}({self.type_name} *self);",
-            f"void {self.update_function_name}({self.type_name} *self, {update_parameters});",
+            f"void {self.update_function_name}({', '.join([f"{self.type_name} *self", *update_parameters])});",
             f"void {self.post_update_function_name}({self.type_name} *self);",
             "",
             f"#endif // #define {self.header_guard}"
         ])
 
         source = '\n'.join([
-            f"#include \"{self.header_file_name}\""
+            f"#include \"{file_base_path}/{self.header_file_name}\""
             "",
             "",
             "\n".join(map(lambda x: f"// {x.lexer.source_file}:{x.line}:{x.col}\n{x.value}", self.c_blocks)),
@@ -311,13 +318,13 @@ class SystemNode:
             f"void {self.initialize_function_name}({self.type_name} *self) {{{self.init.value}}}",
             "",
             f"// {self.destroy.lexer.source_file}:{self.destroy.line}:{self.destroy.col}",
-            f"void {self.destroy_function_name}({self.type_name} *self, {update_parameters}) {{{self.destroy.value}}}",
+            f"void {self.destroy_function_name}({self.type_name} *self) {{{self.destroy.value}}}",
             "",
             f"// {self.pre_update.lexer.source_file}:{self.pre_update.line}:{self.pre_update.col}",
             f"void {self.pre_update_function_name}({self.type_name} *self) {{{self.pre_update.value}}}",
             "",
             f"// {self.update.lexer.source_file}:{self.update.line}:{self.update.col}",
-            f"void {self.update_function_name}({self.type_name} *self) {{{self.update.value}}}",
+            f"void {self.update_function_name}({', '.join([f"{self.type_name} *self", *update_parameters])}) {{{self.update.value}}}",
             "",
             f"// {self.post_update.lexer.source_file}:{self.post_update.line}:{self.post_update.col}",
             f"void {self.post_update_function_name}({self.type_name} *self) {{{self.post_update.value}}}",
@@ -337,32 +344,16 @@ class ArchetypeNode:
         self.source_file_name = f"{self.full_name}.c"
         self.header_guard = f"{self.full_name.upper()}_H_"
         self.type_name = f"{self.full_name}_t"
-        self.components = [self.parse_use_component(x) for x in self.use_components]
+        self.components = [load_and_parse(x, self.source_directory, lambda p: p.parse_component()) for x in self.use_components]
 
-    # todo: refactor as the same function is being used quite a lot in other classes
-    def parse_use_component(self, use: str) -> str:
-        use_source_file = os.path.normpath(os.path.join(self.source_directory, use))
-        use_source_directory = os.path.dirname(use_source_file)
-        with open(use_source_file) as file:
-            source = file.read()
-        
-        component = Parser(Lexer(source, use_source_file, use_source_directory), use_source_file).parse_component()
-        
-        include_path = os.path.join(os.path.dirname(use), component.header_file_name).replace('\\', '/')
-        if not include_path.startswith('.'):
-            include_path = f"./{include_path}"
-
-        return {'use_directory': use_source_directory, 'include_path': include_path, 'component': component}
-
-    def code_gen(self) -> dict:
-        component_pointers = '\n'.join([f"\t{component['component'].type_name} *{component['component'].name};" for component in self.components])
+    def code_gen(self, file_base_path) -> dict:
+        component_pointers = join_new_lines(*[indent(f"{component.node.type_name} *{component.node.name};") for component in self.components])
         header = '\n'.join([
             f"#ifndef {self.header_guard}",
             f"#define {self.header_guard}",
             "",
             "#include <mici.h>\n",
-            ""
-            "\n".join([f"#include \"{x['include_path']}\"" for x in self.components]),
+            join_new_lines(*[f"#include \"{x.include_path}\"" for x in self.components]),
             "",
             f"typedef struct {self.type_name} {{\n{component_pointers}\n\tsize_t count; size_t capacity;\n}} {self.type_name};"
             "",
@@ -395,64 +386,34 @@ class WorldNode:
         self.source_file_name = f"{self.full_name}.c"
         self.header_guard = f"{self.full_name.upper()}_H_"
         self.type_name = f"{self.full_name}_t"
-        self.archetypes = [self.parse_use_archetype(x) for x in self.use_archetypes]
-        self.systems = [self.parse_use_system(x) for x in self.use_systems]
+        self.archetypes = [load_and_parse(x, self.source_directory, lambda p: p.parse_archetype()) for x in self.use_archetypes]
+        self.systems = [load_and_parse(x, self.source_directory, lambda p: p.parse_system()) for x in self.use_systems]
 
         self.initialize_function_name = f"mici_world_initialize_{self.name}"
         self.update_function_name = f"mici_world_update_{self.name}"
         self.destroy_function_name = f"mici_world_destroy_{self.name}"
-        
-    # todo: refactor as the same function is being used quite a lot in other classes
-    def parse_use_archetype(self, use: str) -> str:
-        use_source_file = os.path.normpath(os.path.join(self.source_directory, use))
-        use_source_directory = os.path.dirname(use_source_file)
-        with open(use_source_file) as file:
-            source = file.read()
-
-        archetype = Parser(Lexer(source, use_source_file, use_source_directory), use_source_file).parse_archetype()
-        
-        include_path = os.path.join(os.path.dirname(use), archetype.header_file_name).replace('\\', '/')
-        if not include_path.startswith('.'):
-            include_path = f"./{include_path}"
-
-        return {'use_directory': use_source_directory, 'include_path': include_path, 'archetype': archetype}
-    
-    # todo: refactor as the same function is being used quite a lot in other classes
-    def parse_use_system(self, use: str) -> str:
-        use_source_file = os.path.normpath(os.path.join(self.source_directory, use))
-        use_source_directory = os.path.dirname(use_source_file)
-        with open(use_source_file) as file:
-            source = file.read()
-    
-        system = Parser(Lexer(source, use_source_file, use_source_directory), use_source_file).parse_system()
-        
-        include_path = os.path.join(os.path.dirname(use), system.header_file_name).replace('\\', '/')
-        if not include_path.startswith('.'):
-            include_path = f"./{include_path}"
-
-        return {'use_directory': use_source_directory, 'include_path': include_path, 'system': system}
 
     def __repr__(self) -> str:
         return f"WorldNode(name: {self.name}, archetypes: {self.use_archetypes}, systems: {self.use_systems}, initialize_order: {self.initialize_order}, update_order: {self.update_order}, destroy_order: {self.destroy_order})"
 
-    def code_gen(self) -> dict:
-        archetype_instances = '\n'.join([f"\t{x['archetype'].type_name} {x['archetype'].name};" for x in self.archetypes])
-        system_instances = '\n'.join([f"\t{x['system'].type_name} {x['system'].name};" for x in self.systems])
+    def code_gen(self, file_base_path) -> dict:
+        archetype_instances = '\n'.join([f"\t{x.node.type_name} {x.node.name};" for x in self.archetypes])
+        system_instances = '\n'.join([f"\t{x.node.type_name} {x.node.name};" for x in self.systems])
 
-        initialize_calls: dict = {system['system'].name: f"{system['system'].initialize_function_name}(self->{system['system'].name});" for system in self.systems}
+        initialize_calls: dict = {system.node.name: f"{system.node.initialize_function_name}(&self->{system.node.name});" for system in self.systems}
         update_calls: dict = {}
-        destroy_calls: dict = {system['system'].name: f"{system['system'].destroy_function_name}(self->{system['system'].name});" for system in self.systems}
+        destroy_calls: dict = {system.node.name: f"{system.node.destroy_function_name}(&self->{system.node.name});" for system in self.systems}
 
         for system in self.systems:
-            required_components = {x['component'].name for x in system['system'].components}
-            eligible_archetypes = [x['archetype'] for x in self.archetypes if required_components.issubset({y['component'].name for y in x['archetype'].components})]
+            required_components = {x.node.name for x in system.node.components}
+            eligible_archetypes = [x.node for x in self.archetypes if required_components.issubset({y.node.name for y in x.node.components})]
 
             for archetype in eligible_archetypes:
-                component_for_update = ", ".join([f"self->{archetype.name}.{x['component'].name}[__mici_archetype_instance_index]" for x in system['system'].components])
-                pre_update_call = f"{system['system'].pre_update_function_name}(self->{system['system'].name});"
-                update_call = f"\t{system['system'].update_function_name}(self->{system['system'].name}, {component_for_update});"
-                post_update_call = f"{system['system'].post_update_function_name}(self->{system['system'].name});"
-                update_calls[system['system'].name] = (f"{pre_update_call}\n\tfor (size_t __mici_archetype_instance_index = 0; __mici_archetype_instance_index < self->{archetype.name}.count; ++__mici_archetype_instance_index) {{\n\t{update_call}\n\t}}\n\t{post_update_call}")
+                component_for_update = [f"&self->{archetype.name}.{x.node.name}[__mici_archetype_instance_index]" for x in system.node.components]
+                pre_update_call = f"{system.node.pre_update_function_name}(&self->{system.node.name});"
+                update_call = f"\t{system.node.update_function_name}(&self->{', '.join([system.node.name, *component_for_update])});"
+                post_update_call = f"{system.node.post_update_function_name}(&self->{system.node.name});"
+                update_calls[system.node.name] = (f"{pre_update_call}\n\tfor (size_t __mici_archetype_instance_index = 0; __mici_archetype_instance_index < self->{archetype.name}.count; ++__mici_archetype_instance_index) {{\n\t{update_call}\n\t}}\n\t{post_update_call}")
 
         header = '\n'.join([
             f"#ifndef {self.header_guard}",
@@ -460,9 +421,9 @@ class WorldNode:
             "",
             "#include <mici.h>",
             "",
-            "\n".join([f"#include \"{x['include_path']}\"" for x in self.archetypes]),
+            "\n".join([f"#include \"{x.include_path}\"" for x in self.archetypes]),
             "",
-            "\n".join([f"#include \"{x['include_path']}\"" for x in self.systems]),
+            "\n".join([f"#include \"{x.include_path}\"" for x in self.systems]),
             "",
             f"typedef struct {self.type_name} {{\n{archetype_instances}\n{system_instances}\n}} {self.type_name};\n"
             "",
@@ -474,15 +435,38 @@ class WorldNode:
         ])
 
         source = '\n'.join([
-            f"#include {self.header_file_name}",
+            f"#include \"{file_base_path}/{self.header_file_name}\"",
             "",
             f"void {self.initialize_function_name}({self.type_name} *self) {{\n{'\n'.join([f"\t{initialize_calls[system]}" for system in self.initialize_order])}\n}}",
+            "",
             f"void {self.update_function_name}({self.type_name} *self) {{\n{'\n\n'.join([f"\t{update_calls[system]}" for system in self.initialize_order])}\n}}",
+            "",
             f"void {self.destroy_function_name}({self.type_name} *self) {{\n{'\n'.join([f"\t{destroy_calls[system]}" for system in self.initialize_order])}\n}}",
         ])
 
         return {"header_file_name": self.header_file_name, "header": header, "source_file_name": self.source_file_name, "source": source}
         
+_PARSE_CACHE = {}
+def load_and_parse(path: str, base_path: str, parse_function: function):
+    use_source_file = os.path.normpath(os.path.join(base_path, path))
+    use_source_directory = os.path.dirname(use_source_file)
+
+    if use_source_file in _PARSE_CACHE:
+        return _PARSE_CACHE[use_source_file]
+
+    with open(use_source_file) as file:
+        source = file.read()
+
+    parser = Parser(Lexer(source, use_source_file, use_source_directory), use_source_file)
+    node = parse_function(parser)
+    
+    include_path = os.path.join(os.path.dirname(path), node.header_file_name).replace('\\', '/')
+    if not include_path.startswith('.'):
+        include_path = f"./{include_path}"
+
+    result = UseEntry(use_source_directory, include_path, node)
+    _PARSE_CACHE[use_source_file] = result
+    return result
 
 class Parser():
     def __init__(self, lexer: Lexer, source_file: str):
@@ -511,14 +495,18 @@ class Parser():
             raise ParserException(self, f"expected {types}, but got {token.type}")
         return self.advance()
     
+    def parse_c_block(self) -> Token:
+        self.expect(TokenType.LBRACE)
+        self.lexer.mode = LexerMode.RAW_C
+        token = self.expect(TokenType.C_BLOCK)
+        self.lexer.mode = LexerMode.DEFAULT
+        self.expect(TokenType.RBRACE)
+        return token
+
     def parse_component(self) -> ComponentNode:
         self.expect(TokenType.KW_COMPONENT)
         component_name = self.expect(TokenType.IDENTIFIER).value
-        self.expect(TokenType.LBRACE)
-        self.lexer.mode = LexerMode.RAW_C
-        component_struct = self.expect(TokenType.C_BLOCK)
-        self.lexer.mode = LexerMode.DEFAULT
-        self.expect(TokenType.RBRACE)
+        component_struct = self.parse_c_block()
         self.expect(TokenType.SEMICOLON)
 
         while self.is_not_over():
@@ -531,11 +519,7 @@ class Parser():
     def parse_system(self) -> SystemNode:
         self.expect(TokenType.KW_SYSTEM)
         system_name = self.expect(TokenType.IDENTIFIER).value
-        self.expect(TokenType.LBRACE)
-        self.lexer.mode = LexerMode.RAW_C
-        system_struct = self.expect(TokenType.C_BLOCK)
-        self.lexer.mode = LexerMode.DEFAULT
-        self.expect(TokenType.RBRACE)
+        system_struct = self.parse_c_block()
         self.expect(TokenType.SEMICOLON)
 
         system_use_components: list[str] = []
@@ -562,63 +546,39 @@ class Parser():
                 if system_init != None:
                     raise ParserException(self, "only one init allowed per system")
                 self.advance()
-                self.expect(TokenType.LBRACE)
-                self.lexer.mode = LexerMode.RAW_C
-                system_init = self.expect(TokenType.C_BLOCK)
-                self.lexer.mode = LexerMode.DEFAULT
-                self.expect(TokenType.RBRACE)
+                system_init = self.parse_c_block()
                 continue
 
             if token.type == TokenType.KW_DESTROY:
                 if system_destroy != None:
                     raise ParserException(self, "only one destroy allowed per system")
                 self.advance()
-                self.expect(TokenType.LBRACE)
-                self.lexer.mode = LexerMode.RAW_C
-                system_destroy = self.expect(TokenType.C_BLOCK)
-                self.lexer.mode = LexerMode.DEFAULT
-                self.expect(TokenType.RBRACE)
+                system_destroy = self.parse_c_block()
                 continue
             
             if token.type == TokenType.KW_PRE_UPDATE:
                 if system_pre_update != None:
                     raise ParserException(self, "only one pre_update allowed per system")
                 self.advance()
-                self.expect(TokenType.LBRACE)
-                self.lexer.mode = LexerMode.RAW_C
-                system_pre_update = self.expect(TokenType.C_BLOCK)
-                self.lexer.mode = LexerMode.DEFAULT
-                self.expect(TokenType.RBRACE)
+                system_pre_update = self.parse_c_block()
                 continue
 
             if token.type == TokenType.KW_UPDATE:
                 if system_update != None:
                     raise ParserException(self, "only one update allowed per system")
                 self.advance()
-                self.expect(TokenType.LBRACE)
-                self.lexer.mode = LexerMode.RAW_C
-                system_update = self.expect(TokenType.C_BLOCK)
-                self.lexer.mode = LexerMode.DEFAULT
-                self.expect(TokenType.RBRACE)
+                system_update = self.parse_c_block()
                 continue
 
             if token.type == TokenType.KW_POST_UPDATE:
                 if system_post_update != None:
                     raise ParserException(self, "only one post_update allowed per system")
                 self.advance()
-                self.expect(TokenType.LBRACE)
-                self.lexer.mode = LexerMode.RAW_C
-                system_post_update = self.expect(TokenType.C_BLOCK)
-                self.lexer.mode = LexerMode.DEFAULT
-                self.expect(TokenType.RBRACE)
+                system_post_update = self.parse_c_block()
                 continue
 
             if token.type == TokenType.LBRACE:
-                self.advance()
-                self.lexer.mode = LexerMode.RAW_C
-                system_c_blocks.append(self.expect(TokenType.C_BLOCK))
-                self.lexer.mode = LexerMode.DEFAULT
-                self.expect(TokenType.RBRACE)
+                system_c_blocks.append(self.parse_c_block())
                 continue
 
             raise ParserException(self, f"unexpected token {token.type.name} ({token.value})")
@@ -655,8 +615,7 @@ class Parser():
         world_update_order: list[str] = []
         world_destroy_order: list[str] = []
         self.expect(TokenType.SEMICOLON)
-
-        # todo: cache those. I keep re-parsing them
+        
         parsed_use_systems = {}
 
         while self.is_not_over():
@@ -670,11 +629,7 @@ class Parser():
                 use_name = self.expect(TokenType.STRING).value
                 if use_type.type == TokenType.KW_SYSTEM: 
                     world_use_systems.append(use_name)
-                    use_source_file = os.path.join(self.lexer.source_directory, use_name)
-                    use_source_directory = os.path.dirname(use_source_file)
-                    with open(use_source_file) as file:
-                        source = file.read()
-                    system = Parser(Lexer(source, use_source_file, use_source_directory), use_source_file).parse_system()
+                    system = load_and_parse(use_name, self.lexer.source_directory, lambda p: p.parse_system()).node
                     parsed_use_systems[system.name] = system
                 elif use_type.type == TokenType.KW_ARCHETYPE: world_use_archetypes.append(use_name)
                 self.expect(TokenType.SEMICOLON)
@@ -766,35 +721,38 @@ if __name__ == "__main__":
         lexer = Lexer(source, file_path, file_directory)
         parser = Parser(lexer, file_path)
 
+        header_file_directory = os.path.join(output_include_path, file_base_path)
+        source_file_directory = os.path.join(output_source_path, file_base_path)
+
         result = {}
 
         if extension == ".mcc":
             node = parser.parse_component()
-            result = node.code_gen()
+            result = node.code_gen(file_base_path)
 
         if extension == '.mcs':
             node = parser.parse_system()
-            result = node.code_gen()
+            result = node.code_gen(file_base_path)
 
         if extension == '.mca':
             node = parser.parse_archetype()
-            result = node.code_gen()
+            result = node.code_gen(file_base_path)
 
         if extension == '.mcw':
             node = parser.parse_world()
-            result = node.code_gen()
+            result = node.code_gen(file_base_path)
 
         if "header_file_name" in result:
-            header_file = os.path.join(output_include_path, file_base_path, result['header_file_name'])
+            header_file = os.path.join(header_file_directory, result['header_file_name'])
             print(f"{file_absolute_path} generated: {header_file}")
-            os.makedirs(os.path.dirname(header_file), exist_ok=True)
+            os.makedirs(header_file_directory, exist_ok=True)
             with open(header_file, "w") as f:
                 f.write(result['header'])
 
         if "source_file_name" in result:
-            source_file = os.path.join(output_source_path, file_base_path, result['source_file_name'])
+            source_file = os.path.join(source_file_directory, result['source_file_name'])
             print(f"{file_absolute_path} generated: {source_file}")
-            os.makedirs(os.path.dirname(source_file), exist_ok=True)
+            os.makedirs(source_file_directory, exist_ok=True)
             with open(source_file, "w") as f:
                 f.write(result['source'])
 

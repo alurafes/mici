@@ -2,21 +2,25 @@ world game;
 use archetype "../archetypes/player.mca";
 
 use system "../systems/render.mcs";
+use system "../systems/test.mcs";
 
 // define initialize order. if not present, it will use the same order as the import order
 initialize
 {
     render;
+    test;
 }
 
 // define update order. if not present, it will use the same order as the import order
 update 
 {
     render;
+    test;
 }
 
 // define destroy order. if not present, it will use the same order as the import order
 destroy
 {
     render;
+    test;
 }

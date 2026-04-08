@@ -1,0 +1,23 @@
+system test {
+
+};
+
+initialize {
+
+}
+
+pre_update {
+
+}
+
+update {
+
+}
+
+post_update {
+
+}
+
+destroy {
+    
+}
